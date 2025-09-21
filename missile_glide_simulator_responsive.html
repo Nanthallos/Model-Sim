@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Missile Glide Simulator — Standalone (Responsive + ISA)</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root{--bg:#f6f7fb;--card:#fff;--text:#0f172a;--muted:#556;--accent:#2563eb}
+    *{box-sizing:border-box}
+    html,body,#root{height:100%}
+    body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans","Apple Color Emoji","Segoe UI Emoji";color:var(--text);background:var(--bg)}
+    h1,h2,h3{margin:0 0 .4rem 0}
+    .app{padding:16px;max-width:1200px;margin:0 auto}
+    .grid{display:grid;gap:16px}
+    /* Responsive columns: 1 col on phones, 2 equal on tablets, 1:2 on desktops */
+    @media (min-width: 640px){ .grid{ grid-template-columns: 1fr 1fr; } }
+    @media (min-width: 992px){ .grid{ grid-template-columns: 1fr 2fr; } }
+    .card{background:var(--card);border-radius:16px;box-shadow:0 10px 20px rgba(0,0,0,.05);padding:16px}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .btn{border:0;border-radius:12px;padding:10px 12px;font-weight:600;cursor:pointer;touch-action:manipulation}
+    .btn.primary{background:var(--accent);color:#fff}
+    .btn.ghost{background:#edf2ff;color:#1e293b}
+    .btn.gray{background:#e5e7eb;color:#111827}
+    .small{font-size:12px;color:#475569}
+    .section-title{font-weight:700;margin-bottom:8px}
+    .scenario{border:1px solid #eee;border-radius:12px;padding:10px;margin-bottom:10px}
+    .scenario .row{justify-content:space-between}
+    .scenario input[type='text']{font-weight:600;border:0;background:#f8fafc;padding:10px;border-radius:8px;min-width:0;max-width:100%}
+    label{font-size:12px;color:#334155;display:block}
+    input[type='number'],select{width:100%;padding:10px;border:1px solid #e2e8f0;border-radius:10px;margin-top:6px;font-size:14px}
+    input[type='checkbox']{transform:scale(1.2);margin-left:8px}
+    table{width:100%;border-collapse:collapse;font-size:12px}
+    th,td{padding:8px 10px;border-bottom:1px solid #e5e7eb;text-align:left}
+    .canvas-wrap{width:100%;}
+    canvas{width:100%;height:auto;border:1px solid #e5e7eb;border-radius:12px;display:block;touch-action:none}
+    .footer{margin-top:10px;font-size:12px;color:#64748b}
+    .sweep{height:260px;border:1px solid #e5e7eb;border-radius:12px;margin-top:8px}
+    .tag{display:inline-block;background:#f1f5f9;color:#0f172a;padding:4px 8px;border-radius:999px;font-size:12px;margin-left:6px}
+    /* Make inputs easier to tap */
+    input, select, button{min-height:40px}
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+const {useState, useRef, useEffect} = React;
+
+// ---- International Standard Atmosphere (1976) up to 86 km ----
+function isaDensity(alt_m) {
+  const Re = 6371000; // m
+  const g0 = 9.80665;
+  const R = 287.05287; // J/(kg·K)
+  const T0 = 288.15;   // K
+  const P0 = 101325;   // Pa
+
+  const h = (Re * alt_m) / (Re + alt_m); // geopotential height
+
+  const Hb = [0, 11000, 20000, 32000, 47000, 51000, 71000, 86000];
+  const Lb = [-0.0065, 0.0, 0.001, 0.0028, 0.0, -0.0028, -0.002, 0];
+
+  let Tb = T0;
+  let Pb = P0;
+  let layer = 0;
+
+  for (let i = 0; i < Hb.length - 1; i++) {
+    const hLow = Hb[i];
+    const hHigh = Hb[i + 1];
+    const L = Lb[i];
+    if (h >= hHigh) {
+      if (L === 0) {
+        const dh = hHigh - hLow;
+        Pb = Pb * Math.exp((-g0 * dh) / (R * Tb));
+      } else {
+        const T2 = Tb + L * (hHigh - hLow);
+        Pb = Pb * Math.pow(T2 / Tb, (-g0 / (L * R)));
+        Tb = T2;
+      }
+    } else {
+      layer = i;
+      break;
+    }
+  }
+
+  const L = Lb[layer];
+  const hLayer = Math.min(Math.max(h, Hb[layer]), Hb[layer + 1]);
+  let T, P;
+
+  if (L === 0) {
+    T = Tb;
+    P = Pb * Math.exp((-g0 * (hLayer - Hb[layer])) / (R * T));
+  } else {
+    T = Tb + L * (hLayer - Hb[layer]);
+    P = Pb * Math.pow(T / Tb, (-g0 / (L * R)));
+  }
+  return P / (R * T);
+}
+
+function gravityAtAlt(alt_m) {
+  const Re = 6371000;
+  const g0 = 9.80665;
+  return g0 * Math.pow(Re / (Re + alt_m), 2);
+}
+
+const defaultScenario = (id) => ({
+  id,
+  name: \`Scenario \${id}\`,
+  altitude: 5000,
+  speed: 300,
+  angle: -5,
+  mass: 500,
+  area: 0.8,
+  cd: 0.08,
+  LoverD: 8,
+  useISA: true,
+  rho: 1.225,
+  color: id === 1 ? "#ff4d4f" : id === 2 ? "#2563eb" : id === 3 ? "#16a34a" : "#f59e0b",
+});
+
+function MissileGlideSimulator() {
+  const [scenarios, setScenarios] = useState([defaultScenario(1), defaultScenario(2)]);
+  const [results, setResults] = useState([]);
+  const canvasRef = useRef(null);
+  const wrapRef = useRef(null);
+  const [sweepConfig, setSweepConfig] = useState({ enabled: false, param: 'LoverD', from: 2, to: 15, steps: 20, baseScenarioIndex: 0 });
+  const [sweepData, setSweepData] = useState(null);
+
+  function addScenario() { setScenarios(prev => (prev.length >= 4 ? prev : [...prev, defaultScenario(prev.length + 1)])); }
+  function removeScenario(id) { setScenarios(prev => prev.filter(s => s.id !== id)); }
+  function updateScenario(id, patch) { setScenarios(prev => prev.map(s => (s.id === id ? { ...s, ...patch } : s))); }
+
+  function simulateTrajectory(params) {
+    const rad = (params.angle * Math.PI) / 180;
+    let vx = params.speed * Math.cos(rad);
+    let vy = params.speed * Math.sin(rad);
+    let x = 0;
+    let y = Math.max(0, params.altitude);
+    let t = 0;
+
+    const out = [];
+    const { mass, area, cd, LoverD } = params;
+    const dt = 0.02;
+    const maxSteps = 200000;
+
+    for (let i = 0; i < maxSteps; i++) {
+      const v = Math.max(1e-6, Math.hypot(vx, vy));
+      const rho = params.useISA ? isaDensity(Math.max(0, y)) : params.rho;
+      const q = 0.5 * rho * v * v;
+      const D = q * cd * area;
+      const L = LoverD * D;
+      const vhatx = vx / v, vhaty = vy / v;
+      const nx = -vhaty, ny = vhatx;
+      const g = gravityAtAlt(Math.max(0, y));
+      const fx = -D * vhatx + L * nx;
+      const fy = -D * vhaty + L * ny - mass * g;
+      const ax = fx / mass;
+      const ay = fy / mass;
+      vx += ax * dt; vy += ay * dt;
+      x += vx * dt; y += vy * dt; t += dt;
+      out.push({ x, y, vx, vy, t });
+      if (y <= 0) break;
+      if (!isFinite(x) || !isFinite(y) || Math.abs(x) > 1e7) break;
+    }
+    if (out.length >= 2) {
+      const a = out[out.length - 2];
+      const b = out[out.length - 1];
+      if (b.y <= 0 && a.y > 0) {
+        const frac = a.y / (a.y - b.y);
+        const xf = a.x + (b.x - a.x) * frac;
+        const tf = a.t + (b.t - a.t) * frac;
+        out[out.length - 1] = { x: xf, y: 0, vx: b.vx, vy: b.vy, t: tf };
+      }
+    }
+    return out;
+  }
+
+  function runAll(animate = true) {
+    const sims = scenarios.map(s => ({ s, traj: simulateTrajectory(s) }));
+    const res = sims.map(({ s, traj }) => ({
+      id: s.id, name: s.name,
+      range: traj.length ? traj[traj.length - 1].x : 0,
+      time: traj.length ? traj[traj.length - 1].t : 0,
+      traj, s,
+    }));
+    setResults(res);
+    if (animate) draw(res);
+  }
+
+  // Responsive canvas handling with DPR scaling
+  function fitCanvas() {
+    const canvas = canvasRef.current;
+    const wrap = wrapRef.current;
+    if (!canvas || !wrap) return;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const cssWidth = wrap.clientWidth;
+    const cssHeight = Math.max(260, Math.round(cssWidth * 0.42)); // 42% aspect for phones
+    // Set CSS size
+    canvas.style.width = cssWidth + "px";
+    canvas.style.height = cssHeight + "px";
+    // Set buffer size
+    const needW = Math.round(cssWidth * dpr);
+    const needH = Math.round(cssHeight * dpr);
+    if (canvas.width !== needW || canvas.height !== needH) {
+      canvas.width = needW;
+      canvas.height = needH;
+    }
+  }
+
+  function draw(resList) {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const w = canvas.width;
+    const h = canvas.height;
+    // scale for DPR (we already set pixel buffer; use 1:1 here)
+    ctx.clearRect(0, 0, w, h);
+
+    const maxX = Math.max(...resList.map(r => (r.traj.length ? r.traj[r.traj.length - 1].x : 1)), 1);
+    const maxY = Math.max(...resList.map(r => Math.max(0, ...r.traj.map(p => p.y))), 1000);
+    const margin = 50; // extra for labels on mobile
+    const plotW = w - margin * 2;
+    const plotH = h - margin * 2;
+
+    // ground
+    ctx.fillStyle = "#0f172a";
+    ctx.fillRect(0, h - 18, w, 18);
+
+    // axes
+    ctx.strokeStyle = "#94a3b8";
+    ctx.lineWidth = Math.max(1, w / 800);
+    ctx.beginPath();
+    ctx.moveTo(margin, h - margin);
+    ctx.lineTo(margin, margin);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(margin, h - margin);
+    ctx.lineTo(w - margin, h - margin);
+    ctx.stroke();
+
+    ctx.fillStyle = "#0f172a";
+    ctx.font = Math.max(12, Math.round(w / 80)) + "px Inter, sans-serif";
+    ctx.fillText("Range (m)", w / 2 - 40, h - 8);
+    ctx.save();
+    ctx.translate(16, h / 2 + 20);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText("Altitude (m)", 0, 0);
+    ctx.restore();
+
+    const mapX = (x) => margin + (x / maxX) * plotW;
+    const mapY = (y) => h - margin - (y / maxY) * plotH;
+
+    resList.forEach(r => {
+      const traj = r.traj;
+      if (!traj || !traj.length) return;
+      ctx.beginPath();
+      ctx.strokeStyle = r.s.color;
+      ctx.lineWidth = Math.max(2, w / 500);
+      ctx.moveTo(mapX(0), mapY(traj[0].y));
+      for (let i = 0; i < traj.length; i++) {
+        ctx.lineTo(mapX(traj[i].x), mapY(Math.max(0, traj[i].y)));
+      }
+      ctx.stroke();
+      const last = traj[traj.length - 1];
+      ctx.beginPath();
+      ctx.fillStyle = r.s.color;
+      ctx.arc(mapX(last.x), mapY(last.y), Math.max(3, w / 300), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillText(`${r.name}: ${(last.x).toFixed(0)} m`, mapX(last.x) + 8, mapY(last.y) - 8);
+    });
+  }
+
+  function runSweep() {
+    const cfg = sweepConfig;
+    const base = scenarios[cfg.baseScenarioIndex] || scenarios[0];
+    const vals = [];
+    for (let i = 0; i < cfg.steps; i++) {
+      const t = i / (cfg.steps - 1);
+      vals.push(cfg.from + (cfg.to - cfg.from) * t);
+    }
+    const out = vals.map(v => {
+      const sc = { ...base };
+      sc[cfg.param] = v;
+      const traj = simulateTrajectory(sc);
+      return { paramValue: v, range: traj.length ? traj[traj.length - 1].x : 0 };
+    });
+    setSweepData({ cfg, out });
+  }
+
+  function exportCSV() {
+    const header = ["name","altitude","speed","angle","mass","area","cd","LoverD","useISA","rho_if_const","range_m","time_s"];
+    const rows = results.map(r => {
+      const s = r.s;
+      return [s.name, s.altitude, s.speed, s.angle, s.mass, s.area, s.cd, s.LoverD, s.useISA, s.rho, r.range, r.time];
+    });
+    const csv = [header, ...rows].map(a => a.join(",")).join("\\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "missile_sim_results.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // Resize observer to keep canvas crisp & responsive
+  useEffect(() => {
+    fitCanvas();
+    const ro = new ResizeObserver(() => { fitCanvas(); draw(results); });
+    if (wrapRef.current) ro.observe(wrapRef.current);
+    window.addEventListener('orientationchange', () => { setTimeout(() => { fitCanvas(); draw(results); }, 250); });
+    return () => { ro.disconnect(); window.removeEventListener('orientationchange', () => {}); };
+  }, [wrapRef.current]);
+
+  useEffect(() => { runAll(false); }, []);
+
+  return (
+    <div className="app">
+      <h1 style={{fontSize:24,fontWeight:700,marginBottom:6}}>Missile Glide Simulator</h1>
+      <div className="small">Standalone single HTML • Mobile-responsive • ISA-1976 air density • 2D point-mass with lift (L/D) + quadratic drag</div>
+      <div style={{height:8}} />
+      <div className="grid">
+        <div className="card">
+          <div className="row" style={{justifyContent:'space-between', marginBottom:8}}>
+            <div className="section-title">Scenarios</div>
+            <div className="row">
+              <button className="btn primary" onClick={() => runAll(true)}>Run</button>
+              <button className="btn gray" onClick={() => runAll(false)}>Compute</button>
+              <button className="btn ghost" onClick={addScenario}>Add</button>
+            </div>
+          </div>
+
+          {scenarios.map((s, idx) => (
+            <div key={s.id} className="scenario">
+              <div className="row">
+                <input type="text" value={s.name} onChange={e=>updateScenario(s.id,{name:e.target.value})} />
+                <div className="row">
+                  <span className="tag">#{idx+1}</span>
+                  <button className="btn gray" onClick={() => removeScenario(s.id)}>Delete</button>
+                </div>
+              </div>
+              <div className="grid" style={{gridTemplateColumns:'1fr 1fr', gap:10, marginTop:8}}>
+                <div><label>Release altitude (m)<input inputmode="decimal" type="number" value={s.altitude} onChange={e=>updateScenario(s.id,{altitude:parseFloat(e.target.value)})}/></label></div>
+                <div><label>Release speed (m/s)<input inputmode="decimal" type="number" value={s.speed} onChange={e=>updateScenario(s.id,{speed:parseFloat(e.target.value)})}/></label></div>
+                <div><label>Release angle (deg)<input inputmode="decimal" type="number" value={s.angle} onChange={e=>updateScenario(s.id,{angle:parseFloat(e.target.value)})}/></label></div>
+                <div><label>Lift-to-Drag (L/D)<input inputmode="decimal" type="number" value={s.LoverD} onChange={e=>updateScenario(s.id,{LoverD:parseFloat(e.target.value)})}/></label></div>
+                <div><label>Mass (kg)<input inputmode="decimal" type="number" value={s.mass} onChange={e=>updateScenario(s.id,{mass:parseFloat(e.target.value)})}/></label></div>
+                <div><label>Reference area (m²)<input inputmode="decimal" type="number" value={s.area} onChange={e=>updateScenario(s.id,{area:parseFloat(e.target.value)})}/></label></div>
+                <div><label>Drag coefficient (Cd)<input inputmode="decimal" type="number" step="0.01" value={s.cd} onChange={e=>updateScenario(s.id,{cd:parseFloat(e.target.value)})}/></label></div>
+                <div>
+                  <label>Air density model
+                    <div className="row" style={{marginTop:4}}>
+                      <span>Use ISA</span>
+                      <input type="checkbox" checked={s.useISA} onChange={e=>updateScenario(s.id,{useISA:e.target.checked})} />
+                    </div>
+                  </label>
+                  {!s.useISA && (
+                    <label style={{marginTop:6}}>Constant ρ (kg/m³)
+                      <input inputmode="decimal" type="number" step="0.001" value={s.rho} onChange={e=>updateScenario(s.id,{rho:parseFloat(e.target.value)})}/>
+                    </label>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+
+          <div className="section-title" style={{marginTop:8}}>Results</div>
+          <table>
+            <thead><tr><th>Name</th><th>Range (m)</th><th>Time (s)</th></tr></thead>
+            <tbody>
+              {results.map(r => <tr key={r.id}><td>{r.name}</td><td>{Math.round(r.range)}</td><td>{r.time ? r.time.toFixed(1) : "-"}</td></tr>)}
+            </tbody>
+          </table>
+          <div className="row" style={{marginTop:8}}>
+            <button className="btn primary" onClick={exportCSV}>Export CSV</button>
+          </div>
+
+          <div className="section-title" style={{marginTop:14}}>Sweep (parameter study)</div>
+          <div className="grid" style={{gridTemplateColumns:'1fr 1fr', gap:10}}>
+            <div><label>Param<select value={sweepConfig.param} onChange={e=>setSweepConfig({...sweepConfig, param:e.target.value})}>
+              <option value="LoverD">L/D</option>
+              <option value="altitude">Altitude</option>
+              <option value="speed">Speed</option>
+              <option value="angle">Angle</option>
+            </select></label></div>
+            <div><label>Base scenario<select value={sweepConfig.baseScenarioIndex} onChange={e=>setSweepConfig({...sweepConfig, baseScenarioIndex:parseInt(e.target.value)})}>
+              {scenarios.map((s,i)=><option key={s.id} value={i}>{s.name}</option>)}
+            </select></label></div>
+            <div><label>From<input inputmode="decimal" type="number" value={sweepConfig.from} onChange={e=>setSweepConfig({...sweepConfig, from:parseFloat(e.target.value)})}/></label></div>
+            <div><label>To<input inputmode="decimal" type="number" value={sweepConfig.to} onChange={e=>setSweepConfig({...sweepConfig, to:parseFloat(e.target.value)})}/></label></div>
+            <div><label>Steps<input inputmode="numeric" type="number" value={sweepConfig.steps} onChange={e=>setSweepConfig({...sweepConfig, steps:parseInt(e.target.value)})}/></label></div>
+          </div>
+          <div className="row" style={{marginTop:8}}>
+            <button className="btn primary" onClick={runSweep}>Run sweep</button>
+            <button className="btn gray" onClick={()=>setSweepData(null)}>Clear</button>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="row" style={{justifyContent:'space-between', marginBottom:8}}>
+            <div className="section-title">Trajectory View</div>
+          </div>
+          <div className="canvas-wrap" ref={wrapRef}>
+            <canvas ref={canvasRef}></canvas>
+          </div>
+          <div className="section-title" style={{marginTop:12}}>Sweep Plot</div>
+          <div className="sweep">
+            {/* Simple SVG plot that's also responsive */}
+            {sweepData ? (
+              <svg viewBox="0 0 900 260" width="100%" height="260" preserveAspectRatio="xMidYMid meet">
+                {(() => {
+                  const padding = 40;
+                  const W = 900, H = 260;
+                  const out = sweepData.out;
+                  const maxR = Math.max(...out.map(o => o.range));
+                  const minR = Math.min(...out.map(o => o.range));
+                  const minP = Math.min(...out.map(o => o.paramValue));
+                  const maxP = Math.max(...out.map(o => o.paramValue));
+                  const mapX = v => padding + ((v - minP) / (maxP - minP || 1)) * (W - padding * 2);
+                  const mapY = v => H - padding - ((v - minR) / (maxR - minR || 1)) * (H - padding * 2);
+                  const pts = out.map(o => \`\${mapX(o.paramValue)},\${mapY(o.range)}\`).join(' ');
+                  return (
+                    <g>
+                      <line x1={padding} y1={H-padding} x2={W-padding} y2={H-padding} stroke="#cbd5e1" />
+                      <line x1={padding} y1={padding} x2={padding} y2={H-padding} stroke="#cbd5e1" />
+                      <polyline fill="none" stroke="#111827" strokeWidth="2" points={pts} />
+                      {out.map((o,i) => <circle key={i} cx={mapX(o.paramValue)} cy={mapY(o.range)} r="3" />)}
+                    </g>
+                  );
+                })()}
+              </svg>
+            ) : (
+              <div className="small" style={{padding:10}}>Run a sweep to see how range changes with the selected parameter.</div>
+            )}
+          </div>
+          <div className="footer">
+            Notes: Model uses ISA-1976 density up to 86 km and gravity that weakens with altitude. It ignores wind, Earth curvature/rotation, compressibility and Mach effects, and control/guidance limits. Use for comparative/educational purposes only.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<MissileGlideSimulator />);
+  </script>
+</body>
+</html>
